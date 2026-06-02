@@ -609,7 +609,7 @@ select.theme {
 }
 
 .threeControls button {
-  height: 40px;
+  height: 44px;
   border: 1px solid rgba(255, 255, 255, 0.18);
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.08);
@@ -618,6 +618,10 @@ select.theme {
   font-size: 18px;
   font-weight: 750;
   line-height: 1;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
 }
 
 .threeControls button:hover {
