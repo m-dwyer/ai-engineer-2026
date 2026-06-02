@@ -13,6 +13,7 @@ interface HeaderProps {
   theme: "dark" | "light";
   tracksOff: Set<string>;
   onDayChange: (day: string) => void;
+  onOpenPicks: () => void;
   onRefresh: () => void;
   onResetFilters: () => void;
   onThemeChange: (theme: string) => void;
@@ -32,6 +33,7 @@ export function Header({
   theme,
   tracksOff,
   onDayChange,
+  onOpenPicks,
   onRefresh,
   onResetFilters,
   onThemeChange,
@@ -47,7 +49,11 @@ export function Header({
         <h1>{data.conference.name}</h1>
         <span className="sub">data as of {dataAge}</span>
         <span className="grow" />
-        <span className="count">{starCount ? `★ ${starCount} pick${starCount > 1 ? "s" : ""}` : ""}</span>
+        {starCount ? (
+          <button className="count" type="button" onClick={onOpenPicks} title="View your picks">
+            ★ {starCount} pick{starCount > 1 ? "s" : ""}
+          </button>
+        ) : null}
         <div className="segmented" aria-label="Schedule view">
           <button className={activeView === "grid" ? "on" : ""} type="button" onClick={() => onViewChange("grid")}>
             Grid

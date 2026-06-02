@@ -255,6 +255,16 @@ select.theme {
   color: var(--star);
   font-size: 12px;
   font-weight: 650;
+  background: color-mix(in srgb, var(--star) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--star) 35%, var(--line));
+  border-radius: 999px;
+  padding: 5px 11px;
+  cursor: pointer;
+}
+
+.count:hover {
+  background: color-mix(in srgb, var(--star) 22%, transparent);
+  border-color: color-mix(in srgb, var(--star) 55%, var(--line));
 }
 
 .banner {
@@ -679,6 +689,61 @@ select.theme {
 
 .drawer.show {
   transform: none;
+}
+
+.drawer.left {
+  right: auto;
+  left: 0;
+  border-left: none;
+  border-right: 1px solid var(--line);
+  transform: translateX(-100%);
+  box-shadow: 16px 0 50px rgba(0, 0, 0, 0.4);
+}
+
+.drawer.left.show {
+  transform: none;
+}
+
+.pickrow {
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+}
+
+.pickrow .rel {
+  flex: 1;
+  min-width: 0;
+}
+
+.pickrow .rt {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pickrow .rm .dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 5px;
+  vertical-align: middle;
+}
+
+.pickstar {
+  flex: none;
+  margin-top: 7px;
+  width: 34px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--star);
+  font-size: 15px;
+  cursor: pointer;
+}
+
+.pickstar:hover {
+  border-color: color-mix(in srgb, var(--star) 55%, var(--line));
+  background: var(--panel2);
 }
 
 .dh {
