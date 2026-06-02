@@ -2,7 +2,9 @@ import { Suspense, lazy, useEffect, useMemo, useState } from "react";
 import { Header } from "./components/Header";
 import { ClashBanner } from "./components/ClashBanner";
 import { DetailDrawer } from "./components/DetailDrawer";
+import { PicksDrawer } from "./components/PicksDrawer";
 import { ScheduleGrid } from "./components/ScheduleGrid";
+import { toMinutes } from "./lib/schedule";
 import { EMBEDDED_AT } from "./lib/constants";
 import { fetchLatestSchedule } from "./lib/refresh";
 import { computeClashes, makeSessionMap, sessionsForDay } from "./lib/schedule";
@@ -31,12 +33,23 @@ export function App() {
   const [activeView, setActiveView] = useState<ScheduleView>("grid");
   const [refreshState, setRefreshState] = useState<"idle" | "loading" | "updated" | "offline">("idle");
   const [clashDismissed, setClashDismissed] = useState(false);
+  const [picksOpen, setPicksOpen] = useState(false);
 
   const sessionMap = useMemo(() => makeSessionMap(data), [data]);
   const daySessions = useMemo(() => sessionsForDay(data, day), [data, day]);
   const clashes = useMemo(() => computeClashes(daySessions, stars), [daySessions, stars]);
   const selectedSession = selectedSessionId ? sessionMap.get(selectedSessionId) ?? null : null;
   const filters = useMemo(() => ({ tracksOff, theme: selectedTheme }), [tracksOff, selectedTheme]);
+
+  // Starred sessions across all days, sorted chronologically for the picks panel.
+  const picks = useMemo(
+    () =>
+      [...stars]
+        .map((id) => sessionMap.get(id))
+        .filter((session): session is Session => Boolean(session))
+        .sort((a, b) => (a.date === b.date ? toMinutes(a.start_time) - toMinutes(b.start_time) : a.date.localeCompare(b.date))),
+    [stars, sessionMap],
+  );
 
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
@@ -90,6 +103,12 @@ export function App() {
     setSelectedSessionId(session.id);
   }
 
+  function jumpToPick(session: Session) {
+    if (session.date !== day) setDay(session.date);
+    setSelectedSessionId(session.id);
+    setPicksOpen(false);
+  }
+
   const visibleClashBanner = clashes.pairs.length > 0 && !clashDismissed;
 
   return (
@@ -101,10 +120,11 @@ export function App() {
         day={day}
         refreshState={refreshState}
         selectedTheme={selectedTheme}
-        starCount={[...stars].filter((id) => sessionMap.has(id)).length}
+        starCount={picks.length}
         theme={theme}
         tracksOff={tracksOff}
         onDayChange={setDay}
+        onOpenPicks={() => setPicksOpen(true)}
         onRefresh={refreshSchedule}
         onResetFilters={resetFilters}
         onThemeChange={setSelectedTheme}
@@ -138,6 +158,14 @@ export function App() {
           />
         </Suspense>
       )}
+
+      <PicksDrawer
+        show={picksOpen}
+        picks={picks}
+        onPick={jumpToPick}
+        onToggleStar={toggleStar}
+        onClose={() => setPicksOpen(false)}
+      />
 
       <DetailDrawer
         session={selectedSession}

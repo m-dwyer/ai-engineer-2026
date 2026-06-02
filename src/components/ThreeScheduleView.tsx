@@ -84,9 +84,25 @@ export function ThreeScheduleView({ clashes, data, day, filters, stars, onOpenSe
     (factor: number) => {
       updateCamera((camera, target) => {
         const offset = camera.position.clone().sub(target).multiplyScalar(factor);
-        const clampedLength = Math.min(34, Math.max(8, offset.length()));
+        const clampedLength = Math.min(40, Math.max(6, offset.length()));
         offset.setLength(clampedLength);
         camera.position.copy(target).add(offset);
+      });
+    },
+    [updateCamera],
+  );
+
+  // Travel along the schedule — move camera + target together over the ground plane
+  // (keeps the viewing angle, so it reads like scrolling forward/back through the day)
+  const moveForward = useCallback(
+    (distance: number) => {
+      updateCamera((camera, target) => {
+        const forward = target.clone().sub(camera.position);
+        forward.y = 0;
+        if (forward.lengthSq() < 1e-6) return;
+        forward.normalize().multiplyScalar(distance);
+        camera.position.add(forward);
+        target.add(forward);
       });
     },
     [updateCamera],
@@ -139,8 +155,28 @@ export function ThreeScheduleView({ clashes, data, day, filters, stars, onOpenSe
     [beginHold, stopHold],
   );
 
+  // Wheel / two-finger trackpad scroll travels along the schedule; pinch (ctrl+wheel)
+  // zooms. Captured before MapControls so it never double-handles the wheel — touch
+  // pinch-zoom on phones is untouched (it uses touch events, handled by the controls).
+  const wrapRef = useRef<HTMLElement>(null);
+  useEffect(() => {
+    const el = wrapRef.current;
+    if (!el) return;
+    const onWheel = (event: WheelEvent) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (event.ctrlKey || event.metaKey) {
+        zoomCamera(event.deltaY > 0 ? 1.06 : 0.94);
+      } else {
+        moveForward(-event.deltaY * 0.013);
+      }
+    };
+    el.addEventListener("wheel", onWheel, { passive: false, capture: true });
+    return () => el.removeEventListener("wheel", onWheel, { capture: true } as EventListenerOptions);
+  }, [zoomCamera, moveForward]);
+
   return (
-    <main className="threeWrap" data-testid="three-view">
+    <main className="threeWrap" data-testid="three-view" ref={wrapRef}>
       <Canvas
         camera={{ position: INITIAL_CAMERA_POSITION.toArray(), fov: 44 }}
         dpr={[1, 2]}
@@ -211,11 +247,17 @@ export function ThreeScheduleView({ clashes, data, day, filters, stars, onOpenSe
       </Canvas>
       <div className="threeHud">
         <span>3D prototype</span>
-        <span>drag to orbit</span>
-        <span>two-finger / scroll to zoom</span>
+        <span>scroll / ⤒⤓ to move</span>
+        <span>drag to orbit · pinch to zoom</span>
         <span>click talks · double-click to star</span>
       </div>
       <div className="threeControls" aria-label="3D camera controls">
+        <button type="button" aria-label="Move forward" title="Move forward" {...holdProps(() => moveForward(1.3), () => moveForward(0.16))}>
+          ⤒
+        </button>
+        <button type="button" aria-label="Move back" title="Move back" {...holdProps(() => moveForward(-1.3), () => moveForward(-0.16))}>
+          ⤓
+        </button>
         <button type="button" aria-label="Yaw left" title="Yaw left" {...holdProps(() => yawCamera(Math.PI / 11), () => yawCamera(0.014))}>
           ◄
         </button>
@@ -240,7 +282,7 @@ export function ThreeScheduleView({ clashes, data, day, filters, stars, onOpenSe
         <button type="button" aria-label="Zoom out" title="Zoom out" {...holdProps(() => zoomCamera(1.15), () => zoomCamera(1.01))}>
           −
         </button>
-        <button className="wide" type="button" onClick={resetCamera}>
+        <button className="reset" type="button" onClick={resetCamera}>
           Reset
         </button>
       </div>
@@ -306,19 +348,25 @@ function ScheduleScene({ clashes, dayStart, duration, filters, sessions, stars, 
         const color = TRACK_COLOR[track] ?? TRACK_COLOR.Event;
         return (
           <group key={track}>
-            {/* Matte track "placemat" — groups cards by track, no glow, just a faint tint */}
-            <mesh position={[x, floorY + 0.004, 0]} rotation={[-Math.PI / 2, 0, 0]}>
+            {/* Matte track "placemat" — groups cards by track, no glow, just a faint tint.
+                Centred on the content (which spans local z [-dayDepth, 0]) so it stays
+                bounded to the day instead of overhanging past the edges. */}
+            <mesh position={[x, floorY + 0.004, -dayDepth / 2]} rotation={[-Math.PI / 2, 0, 0]}>
               <planeGeometry args={[1.34, dayDepth]} />
               <meshBasicMaterial color={color} transparent opacity={0.09} />
             </mesh>
             <Text
-              position={[x, floorY + 0.02, -dayDepth - 0.6]}
+              position={[x, floorY + 0.02, -dayDepth - 0.5]}
               rotation={[-Math.PI / 2, 0, 0]}
-              fontSize={0.22}
+              fontSize={0.14}
               color={shade(color, 0.25)}
               anchorX="center"
-              letterSpacing={0.12}
-              outlineWidth={0.01}
+              anchorY="middle"
+              textAlign="center"
+              maxWidth={X_GAP - 0.18}
+              lineHeight={1.05}
+              letterSpacing={0.02}
+              outlineWidth={0.008}
               outlineColor="#070a16"
             >
               {track.toUpperCase()}
@@ -330,7 +378,8 @@ function ScheduleScene({ clashes, dayStart, duration, filters, sessions, stars, 
       {bands.map((session) => {
         const start = toMinutes(session.start_time) - dayStart;
         const minutes = Math.max(6, toMinutes(session.end_time) - toMinutes(session.start_time));
-        const z = -(start * Z_SCALE + (minutes * Z_SCALE) / 2);
+        // Earliest at the far end, latest near the camera — reads top→down like Grid mode.
+        const z = (start + minutes / 2) * Z_SCALE - dayDepth;
         const depth = Math.max(0.08, minutes * Z_SCALE - 0.04);
 
         return (
@@ -371,7 +420,8 @@ function ScheduleScene({ clashes, dayStart, duration, filters, sessions, stars, 
 
         const start = toMinutes(session.start_time) - dayStart;
         const minutes = Math.max(8, toMinutes(session.end_time) - toMinutes(session.start_time));
-        const z = -(start * Z_SCALE + (minutes * Z_SCALE) / 2);
+        // Earliest at the far end, latest near the camera — reads top→down like Grid mode.
+        const z = (start + minutes / 2) * Z_SCALE - dayDepth;
         const x = index * X_GAP - centerOffset;
         const depth = Math.max(0.25, minutes * Z_SCALE - 0.05);
         const color = TRACK_COLOR[session.track] ?? TRACK_COLOR.Event;
