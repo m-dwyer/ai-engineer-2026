@@ -95,7 +95,7 @@
   }
   .hourlbl{position:absolute; right:7px; transform:translateY(-50%); font-size:11px; color:var(--faint); font-weight:600; font-variant-numeric:tabular-nums}
   .tracks{position:relative; flex:1; min-width:max-content}
-  .cols{display:flex; height:100%; min-width:max-content}
+  .cols{display:flex; height:100%; min-width:max-content; position:relative; z-index:2; pointer-events:none}
   .col{flex:1 0 172px; min-width:172px; border-right:1px solid var(--grid-line); position:relative}
   .colhead{
     position:sticky; top:0; z-index:5; height:32px; display:flex; align-items:center; gap:7px;
@@ -111,7 +111,7 @@
     position:absolute; border-radius:9px; padding:6px 8px; overflow:hidden;
     background:color-mix(in srgb, var(--c) 16%, var(--panel));
     border:1px solid color-mix(in srgb, var(--c) 34%, var(--line));
-    border-left:3px solid var(--c); cursor:pointer; color:var(--ink);
+    border-left:3px solid var(--c); cursor:pointer; color:var(--ink); pointer-events:auto;
     box-shadow:var(--shadow); transition:transform .12s ease, box-shadow .12s ease, background .12s ease, border-color .12s ease;
   }
   .block:hover{
@@ -137,7 +137,7 @@
   .star.on{color:var(--star)}
 
   .band{
-    position:absolute; left:7px; right:7px; z-index:3; border-radius:9px; padding:6px 12px;
+    position:absolute; left:7px; right:7px; z-index:1; border-radius:9px; padding:6px 12px;
     background:var(--band-bg); border:1px solid var(--line); color:var(--muted);
     cursor:pointer; display:flex; align-items:center; gap:9px; font-size:11.5px; overflow:hidden;
     box-shadow:var(--shadow); transition:.12s;
@@ -5601,29 +5601,42 @@ function render(){
   });
 
   // place blocks per track with lane splitting for overlaps
+  // A lane is "busy" until a session's real end OR start+CRAMP, so a very short
+  // session shares its column with the next one (side-by-side) instead of being
+  // painted over. Well-spaced talks (gap >= CRAMP) keep the full column width.
+  const CRAMP=12; // minutes
+  const occ = s => Math.max(toMin(s.end_time), toMin(s.start_time)+CRAMP);
   present.forEach(t=>{
-    const list=cols.filter(s=>s.track===t).sort((a,b)=>toMin(a.start_time)-toMin(b.start_time));
-    // lane assignment
-    const lanes=[]; // end time per lane
-    const laneOf={};
-    list.forEach(s=>{
-      let placed=false;
-      for(let i=0;i<lanes.length;i++){ if(toMin(s.start_time)>=lanes[i]){ lanes[i]=toMin(s.end_time); laneOf[s.id]=i; placed=true; break; } }
-      if(!placed){ laneOf[s.id]=lanes.length; lanes.push(toMin(s.end_time)); }
-    });
-    const nLanes=Math.max(1,lanes.length);
-    list.forEach(s=>{
-      const el=makeBlock(s,t);
-      const h=Math.max(MINH,(toMin(s.end_time)-toMin(s.start_time))*PXPM-2);
-      el.style.top=top(toMin(s.start_time))+"px";
-      el.style.height=h+"px";
-      if(h<=MINH+6) el.classList.add("short");
-      const lane=laneOf[s.id], w=100/nLanes;
-      el.style.left=`calc(${lane*w}% + 5px)`;
-      el.style.width=`calc(${w}% - 10px)`;
-      el.style.right="auto";
-      colByTrack[t].appendChild(el);
-    });
+    const list=cols.filter(s=>s.track===t).sort((a,b)=>toMin(a.start_time)-toMin(b.start_time)||toMin(a.end_time)-toMin(b.end_time));
+    let i=0;
+    while(i<list.length){
+      // grow a cluster of sessions that share horizontal space
+      let j=i, bound=occ(list[i]);
+      while(j+1<list.length && toMin(list[j+1].start_time) < bound){ j++; bound=Math.max(bound, occ(list[j])); }
+      const cluster=list.slice(i,j+1);
+      const laneEnd=[], laneArr=[], laneOf=new Map();
+      cluster.forEach(s=>{
+        let k=0; while(k<laneEnd.length && toMin(s.start_time)<laneEnd[k]) k++;
+        if(k===laneEnd.length){ laneEnd.push(0); laneArr.push([]); }
+        laneEnd[k]=occ(s); laneOf.set(s,k); laneArr[k].push(s);
+      });
+      const nLanes=laneEnd.length, w=100/nLanes;
+      cluster.forEach(s=>{
+        const el=makeBlock(s,t);
+        const k=laneOf.get(s);
+        let h=Math.max(MINH,(toMin(s.end_time)-toMin(s.start_time))*PXPM-2);
+        const arr=laneArr[k], nxt=arr[arr.indexOf(s)+1];
+        if(nxt) h=Math.min(h, Math.max(14,(toMin(nxt.start_time)-toMin(s.start_time))*PXPM-2));
+        el.style.top=top(toMin(s.start_time))+"px";
+        el.style.height=h+"px";
+        if(h<=MINH+6) el.classList.add("short");
+        el.style.left=`calc(${k*w}% + 5px)`;
+        el.style.width=`calc(${w}% - 10px)`;
+        el.style.right="auto";
+        colByTrack[t].appendChild(el);
+      });
+      i=j+1;
+    }
   });
 
   // bands across full width of tracks area
