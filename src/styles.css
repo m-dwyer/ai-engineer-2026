@@ -640,6 +640,13 @@ select.theme {
   text-transform: uppercase;
 }
 
+.threeControls .reset {
+  grid-column: span 2;
+  font-size: 12px;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}
+
 .scrim {
   position: fixed;
   inset: 0;
@@ -907,5 +914,9 @@ select.theme {
 
   .threeControls .wide {
     grid-column: auto;
+  }
+
+  .threeControls .reset {
+    grid-column: 1 / -1;
   }
 }
