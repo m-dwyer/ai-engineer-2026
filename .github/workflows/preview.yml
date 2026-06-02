@@ -1,0 +1,50 @@
+name: Deploy branch preview to Pages
+
+# Builds any non-main branch and publishes it to gh-pages/preview/<branch>/ so it can be tested
+# (e.g. on a phone) at https://<owner>.github.io/<repo>/preview/<branch>/ without touching the
+# production site at the root.
+on:
+  push:
+    branches-ignore: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# Share one queue with deploy.yml so concurrent deploys don't race on the gh-pages branch.
+concurrency:
+  group: gh-pages
+  cancel-in-progress: false
+
+jobs:
+  build-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Compute preview base path
+        run: |
+          BRANCH="${GITHUB_REF_NAME//\//-}"
+          REPO="${GITHUB_REPOSITORY#*/}"
+          echo "BRANCH=$BRANCH" >> "$GITHUB_ENV"
+          echo "BASE_PATH=/$REPO/preview/$BRANCH/" >> "$GITHUB_ENV"
+      - name: Build
+        run: npm run build
+      - name: Publish to gh-pages (preview/<branch>)
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./dist
+          destination_dir: preview/${{ env.BRANCH }}
+          keep_files: true
+      - name: Preview URL
+        run: |
+          echo "### Preview deployed :rocket:" >> "$GITHUB_STEP_SUMMARY"
+          echo "https://${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY#*/}/preview/${BRANCH}/" >> "$GITHUB_STEP_SUMMARY"
