@@ -348,8 +348,10 @@ function ScheduleScene({ clashes, dayStart, duration, filters, sessions, stars, 
         const color = TRACK_COLOR[track] ?? TRACK_COLOR.Event;
         return (
           <group key={track}>
-            {/* Matte track "placemat" — groups cards by track, no glow, just a faint tint */}
-            <mesh position={[x, floorY + 0.004, 0]} rotation={[-Math.PI / 2, 0, 0]}>
+            {/* Matte track "placemat" — groups cards by track, no glow, just a faint tint.
+                Centred on the content (which spans local z [-dayDepth, 0]) so it stays
+                bounded to the day instead of overhanging past the edges. */}
+            <mesh position={[x, floorY + 0.004, -dayDepth / 2]} rotation={[-Math.PI / 2, 0, 0]}>
               <planeGeometry args={[1.34, dayDepth]} />
               <meshBasicMaterial color={color} transparent opacity={0.09} />
             </mesh>
@@ -376,7 +378,8 @@ function ScheduleScene({ clashes, dayStart, duration, filters, sessions, stars, 
       {bands.map((session) => {
         const start = toMinutes(session.start_time) - dayStart;
         const minutes = Math.max(6, toMinutes(session.end_time) - toMinutes(session.start_time));
-        const z = -(start * Z_SCALE + (minutes * Z_SCALE) / 2);
+        // Earliest at the far end, latest near the camera — reads top→down like Grid mode.
+        const z = (start + minutes / 2) * Z_SCALE - dayDepth;
         const depth = Math.max(0.08, minutes * Z_SCALE - 0.04);
 
         return (
@@ -417,7 +420,8 @@ function ScheduleScene({ clashes, dayStart, duration, filters, sessions, stars, 
 
         const start = toMinutes(session.start_time) - dayStart;
         const minutes = Math.max(8, toMinutes(session.end_time) - toMinutes(session.start_time));
-        const z = -(start * Z_SCALE + (minutes * Z_SCALE) / 2);
+        // Earliest at the far end, latest near the camera — reads top→down like Grid mode.
+        const z = (start + minutes / 2) * Z_SCALE - dayDepth;
         const x = index * X_GAP - centerOffset;
         const depth = Math.max(0.25, minutes * Z_SCALE - 0.05);
         const color = TRACK_COLOR[session.track] ?? TRACK_COLOR.Event;
