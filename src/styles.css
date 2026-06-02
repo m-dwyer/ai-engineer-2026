@@ -564,6 +564,81 @@ select.theme {
   font-weight: 800;
 }
 
+/* Holds the Grid and 3D views so they can overlap during the morph transition. In a steady
+   state only one child is mounted; mid-transition both are stacked here and crossfade. */
+.viewStage {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+}
+
+.viewStage > .wrap,
+.viewStage > .threeWrap {
+  position: absolute;
+  inset: 0;
+  flex: none;
+}
+
+/* Grid→3D: keep the real DOM grid ON TOP and fully opaque while the 3D canvas mounts and compiles
+   shaders behind it (so there's no black flash). Once the canvas has painted its first frame
+   (data-three-ready), fade the grid out to reveal the already-rendered, grid-matching 3D opening —
+   which then tilts up into perspective. So the grid crossfades straight into the 3D, never black. */
+.viewStage[data-phase="in"] > .wrap {
+  z-index: 3;
+}
+
+.viewStage[data-phase="in"][data-three-ready="true"] > .wrap {
+  animation: gridFadeOut 520ms ease forwards;
+  pointer-events: none;
+}
+
+/* The 3D view eases in with a slight scale-settle as the grid blurs away over it — a coordinated
+   focus-pull that smooths over the fact that the two layouts don't line up exactly. */
+.viewStage[data-phase="in"] > .threeWrap {
+  animation: threeSettleIn 620ms ease forwards;
+  transform-origin: center 42%;
+}
+
+/* 3D→grid: the 3D view sits on top, animates its camera back to the grid-matching overhead
+   framing, then unmounts to reveal the DOM grid underneath. */
+.viewStage[data-phase="out"] > .threeWrap {
+  z-index: 3;
+}
+
+/* Grid dissolves with a blur + slight zoom — reads as the camera pushing through the flat grid
+   into the 3D scene, and the blur hides residual misalignment between the two. */
+@keyframes gridFadeOut {
+  from {
+    opacity: 1;
+    filter: blur(0);
+    transform: scale(1);
+  }
+  to {
+    opacity: 0;
+    filter: blur(11px);
+    transform: scale(1.09);
+  }
+}
+
+@keyframes threeSettleIn {
+  from {
+    transform: scale(1.035);
+  }
+  to {
+    transform: scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .viewStage[data-phase="in"][data-three-ready="true"] > .wrap {
+    animation: none;
+    opacity: 0;
+  }
+  .viewStage[data-phase="in"] > .threeWrap {
+    animation: none;
+  }
+}
+
 .threeWrap {
   flex: 1;
   position: relative;

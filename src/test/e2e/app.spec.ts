@@ -14,7 +14,9 @@ test("loads the schedule, opens details, and switches to the 3D prototype", asyn
   await expect(page.getByTestId("three-view")).toBeVisible();
   const canvas = page.locator("canvas");
   await expect(canvas).toBeVisible();
-  await page.waitForTimeout(300);
+  // The 3D view renders on demand (during the grid→3D morph) plus a one-time shader compile, so
+  // first paint lands ~1s after mount rather than immediately — give it room before sampling.
+  await page.waitForTimeout(2500);
 
   const hasDrawnPixels = await canvas.evaluate((node) => {
     const target = node as HTMLCanvasElement;
