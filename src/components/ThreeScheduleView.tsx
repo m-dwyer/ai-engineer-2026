@@ -3,7 +3,7 @@ import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { Bloom, EffectComposer, SMAA, ToneMapping, Vignette } from "@react-three/postprocessing";
 import { ToneMappingMode } from "postprocessing";
 import { Suspense, useCallback, useEffect, useMemo, useRef, type ReactNode } from "react";
-import { BackSide, type Group, MOUSE, TOUCH, Vector3, type PerspectiveCamera } from "three";
+import { type AmbientLight, BackSide, type Group, MOUSE, TOUCH, Vector3, type PerspectiveCamera } from "three";
 import type { MapControls as MapControlsImpl } from "three-stdlib";
 import { TRACK_COLOR, TYPE_ICON } from "../lib/constants";
 import { getTimeBounds, isBand, matchesFilter, toMinutes, tracksForDay } from "../lib/schedule";
@@ -14,16 +14,18 @@ const X_GAP = 1.85;
 // Hero (resting) camera framing.
 const INITIAL_CAMERA_POSITION = new Vector3(0, 13.5, 16);
 const INITIAL_TARGET = new Vector3(0, -0.5, -1.5);
-// The intro starts as a high, slightly-tilted near-top-down that mirrors the Grid (tracks as
-// columns, time top→bottom, cards' coloured tops reading like grid blocks). Crossfading the DOM
-// grid into this pose is near-invisible; the camera then tilts up and pulls back into the hero
-// perspective as the cards rise — so the grid literally *becomes* the 3D scene. NB: a *fully*
-// vertical top-down renders the glossy cards black (they mirror the dark zenith), so the opening
-// is pitched ~25° off vertical where the cards catch light. The up-vector tilts toward hero too.
-const OVERHEAD_CAMERA_POSITION = new Vector3(0, 16.5, 4);
-const OVERHEAD_TARGET = new Vector3(0, -1, -3);
-const OVERHEAD_UP = new Vector3(0, 0.5, -0.85);
+// The intro starts as a high, steep near-top-down with a NARROW fov, which flattens the
+// perspective (tracks read as near-parallel columns) and fills the frame — so it roughly mirrors
+// the flat Grid. The camera then tilts up, widens the fov, and pulls into the hero perspective as
+// the cards rise. NB: a steep top-down would render the glossy cards black (they mirror the dark
+// zenith), so MorphLight lifts the fill light during the opening. The up-vector tilts to hero too.
+const OVERHEAD_CAMERA_POSITION = new Vector3(0, 26, 5);
+const OVERHEAD_TARGET = new Vector3(0, -1, -4);
+const OVERHEAD_UP = new Vector3(0, 0.3, -0.95);
 const HERO_UP = new Vector3(0, 1, 0);
+// Narrow opening fov ≈ flatter, more orthographic-looking (less perspective fan); widens to hero.
+const OVERHEAD_FOV = 22;
+const HERO_FOV = 44;
 
 // Transition timing (seconds).
 const CAM_DUR = 1.5;
@@ -234,7 +236,7 @@ export function ThreeScheduleView({ clashes, data, day, filters, stars, phase = 
         // the user interacts, then idle at 0 GPU. (The reflective floor + bloom re-render the
         // scene every frame, so a continuous loop pins the GPU for no reason.)
         frameloop="demand"
-        camera={{ position: (phase === "in" ? OVERHEAD_CAMERA_POSITION : INITIAL_CAMERA_POSITION).toArray(), fov: 44 }}
+        camera={{ position: (phase === "in" ? OVERHEAD_CAMERA_POSITION : INITIAL_CAMERA_POSITION).toArray(), fov: phase === "in" ? OVERHEAD_FOV : HERO_FOV }}
         dpr={lowQuality ? 1 : 1.5}
         gl={{ preserveDrawingBuffer: true, antialias: true }}
         onCreated={({ camera }) => {
@@ -252,8 +254,9 @@ export function ThreeScheduleView({ clashes, data, day, filters, stars, phase = 
           </meshBasicMaterial>
         </mesh>
 
-        {/* Restrained fill — kept low so the card colours stay saturated, not chalky */}
-        <ambientLight intensity={0.4} />
+        {/* Restrained fill — kept low so the card colours stay saturated, not chalky. Lifted during
+            the morph so the steep top-down opening isn't dark (MorphLight). */}
+        <MorphLight reduceMotion={reduceMotion} reveal={reveal} />
         <hemisphereLight args={["#9aa8ff", "#0a0f22", 0.5]} />
         {/* Soft key for specular highlights on the glossy cards (no hard shadow map) */}
         <directionalLight position={[8, 16, 6]} intensity={1.1} />
@@ -419,10 +422,14 @@ function IntroCamera({ controlsRef, phase, reduceMotion, reveal, onPhaseDone, on
     const toTarget = r.phase === "in" ? INITIAL_TARGET : OVERHEAD_TARGET;
     const fromUp = r.phase === "in" ? OVERHEAD_UP : HERO_UP;
     const toUp = r.phase === "in" ? HERO_UP : OVERHEAD_UP;
+    const fromFov = r.phase === "in" ? OVERHEAD_FOV : HERO_FOV;
+    const toFov = r.phase === "in" ? HERO_FOV : OVERHEAD_FOV;
+    const cam = camera as PerspectiveCamera;
 
     if (reduceMotion) {
       camera.position.copy(toPos);
       camera.up.copy(toUp);
+      cam.fov = toFov;
       camera.lookAt(toTarget);
       camera.updateProjectionMatrix();
       settle(r.phase);
@@ -438,6 +445,7 @@ function IntroCamera({ controlsRef, phase, reduceMotion, reveal, onPhaseDone, on
 
     camera.position.lerpVectors(fromPos, toPos, e);
     camera.up.copy(fromUp).lerp(toUp, e).normalize(); // rotate up from top-down (-Z) to hero (+Y)
+    cam.fov = lerp(fromFov, toFov, e); // narrow→wide flattens the opening's perspective
     const target = fromTarget.clone().lerp(toTarget, e);
     camera.lookAt(target);
     camera.updateProjectionMatrix();
@@ -448,6 +456,24 @@ function IntroCamera({ controlsRef, phase, reduceMotion, reveal, onPhaseDone, on
   });
 
   return null;
+}
+
+// Lifts the ambient fill while the morph plays so the steep, near-top-down opening reads as a
+// bright grid (glossy cards otherwise go dark from straight above), settling back to the low
+// resting fill at the hero pose.
+function MorphLight({ reduceMotion, reveal }: { reduceMotion: boolean; reveal: React.RefObject<RevealState> }) {
+  const ref = useRef<AmbientLight>(null);
+  useFrame(() => {
+    const light = ref.current;
+    if (!light) return;
+    const r = reveal.current;
+    let boost = 0;
+    if (!reduceMotion && (r.phase === "in" || r.phase === "out")) {
+      boost = 1 - clamp01(r.elapsed / CAM_DUR); // brightest at the opening, fading to rest
+    }
+    light.intensity = 0.4 + boost * 0.85;
+  });
+  return <ambientLight ref={ref} intensity={0.4} />;
 }
 
 interface ScheduleSceneProps {
