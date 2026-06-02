@@ -17,10 +17,16 @@ import {
   saveTheme,
 } from "./lib/storage";
 import type { ConferenceData, ScheduleView, Session } from "./types";
+import type { ThreePhase } from "./components/ThreeScheduleView";
 
 const ThreeScheduleView = lazy(() =>
   import("./components/ThreeScheduleView").then((module) => ({ default: module.ThreeScheduleView })),
 );
+
+// Morph between Grid and 3D: "in" plays grid→3D, "out" plays 3D→grid; the steady states are
+// "grid" and "three". Both views are mounted during a transition so the camera tilt + tile
+// extrude can play before the grid is torn down (and vice-versa).
+type ViewPhase = "grid" | "in" | "three" | "out";
 
 export function App() {
   const [data, setData] = useState<ConferenceData>(() => loadConferenceData());
@@ -30,7 +36,11 @@ export function App() {
   const [stars, setStars] = useState<Set<string>>(() => loadStarIds());
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [theme, setTheme] = useState<"dark" | "light">(() => loadTheme());
-  const [activeView, setActiveView] = useState<ScheduleView>("grid");
+  const [viewPhase, setViewPhase] = useState<ViewPhase>("grid");
+  // True once the 3D canvas has actually painted its first frame. The grid stays on top and
+  // visible until then, so a grid→3D switch crossfades grid → painted-3D with no black flash
+  // while shaders compile.
+  const [threeReady, setThreeReady] = useState(false);
   const [refreshState, setRefreshState] = useState<"idle" | "loading" | "updated" | "offline">("idle");
   const [clashDismissed, setClashDismissed] = useState(false);
   const [picksOpen, setPicksOpen] = useState(false);
@@ -55,6 +65,12 @@ export function App() {
     document.documentElement.setAttribute("data-theme", theme);
     saveTheme(theme);
   }, [theme]);
+
+  // Warm the lazy 3D chunk in the background so the first grid→3D morph plays immediately
+  // instead of stalling on a network fetch behind the "Loading 3D view" fallback.
+  useEffect(() => {
+    void import("./components/ThreeScheduleView");
+  }, []);
 
   useEffect(() => {
     saveStarIds(stars);
@@ -111,10 +127,32 @@ export function App() {
 
   const visibleClashBanner = clashes.pairs.length > 0 && !clashDismissed;
 
+  // The toggle reflects the destination the user is heading toward, so it highlights correctly
+  // mid-transition (e.g. "Grid" stays lit while the 3D view animates back out).
+  const headerView: ScheduleView = viewPhase === "grid" || viewPhase === "out" ? "grid" : "three";
+  const showGrid = viewPhase !== "three";
+  const showThree = viewPhase !== "grid";
+  const threePhase: ThreePhase = viewPhase === "in" ? "in" : viewPhase === "out" ? "out" : "three";
+
+  function requestView(view: ScheduleView) {
+    if (view === "three")
+      setViewPhase((current) => {
+        if (current === "three" || current === "in") return current;
+        setThreeReady(false); // grid stays on top until the fresh canvas paints
+        return "in";
+      });
+    else setViewPhase((current) => (current === "grid" || current === "out" ? current : "out"));
+  }
+
+  function onThreePhaseDone(donePhase: ThreePhase) {
+    if (donePhase === "in") setViewPhase((current) => (current === "in" ? "three" : current));
+    else if (donePhase === "out") setViewPhase((current) => (current === "out" ? "grid" : current));
+  }
+
   return (
     <>
       <Header
-        activeView={activeView}
+        activeView={headerView}
         data={data}
         dataAge={data.updated_at?.slice(0, 10) ?? EMBEDDED_AT}
         day={day}
@@ -130,24 +168,14 @@ export function App() {
         onThemeChange={setSelectedTheme}
         onThemeToggle={() => setTheme((current) => (current === "light" ? "dark" : "light"))}
         onToggleTrack={toggleTrack}
-        onViewChange={setActiveView}
+        onViewChange={requestView}
       />
 
       <ClashBanner clashes={clashes.pairs} show={visibleClashBanner} onDismiss={() => setClashDismissed(true)} />
 
-      {activeView === "grid" ? (
-        <ScheduleGrid
-          clashes={clashes.ids}
-          data={data}
-          day={day}
-          filters={filters}
-          stars={stars}
-          onOpenSession={openSession}
-          onToggleStar={toggleStar}
-        />
-      ) : (
-        <Suspense fallback={<main className="threeWrap loading">Loading 3D view...</main>}>
-          <ThreeScheduleView
+      <div className="viewStage" data-phase={viewPhase} data-three-ready={threeReady}>
+        {showGrid ? (
+          <ScheduleGrid
             clashes={clashes.ids}
             data={data}
             day={day}
@@ -156,8 +184,26 @@ export function App() {
             onOpenSession={openSession}
             onToggleStar={toggleStar}
           />
-        </Suspense>
-      )}
+        ) : null}
+        {showThree ? (
+          // No visible fallback: during a grid→3D switch the grid is still mounted on top, so it
+          // shows through (rather than a dark "loading" panel) while the lazy chunk/shaders load.
+          <Suspense fallback={null}>
+            <ThreeScheduleView
+              clashes={clashes.ids}
+              data={data}
+              day={day}
+              filters={filters}
+              phase={threePhase}
+              stars={stars}
+              onOpenSession={openSession}
+              onPhaseDone={onThreePhaseDone}
+              onReady={() => setThreeReady(true)}
+              onToggleStar={toggleStar}
+            />
+          </Suspense>
+        ) : null}
+      </div>
 
       <PicksDrawer
         show={picksOpen}

@@ -1,11 +1,48 @@
 import { ContactShadows, Edges, Environment, GradientTexture, Lightformer, MapControls, MeshReflectorMaterial, RoundedBox, Sparkles, Text } from "@react-three/drei";
-import { Canvas } from "@react-three/fiber";
-import { Suspense, useCallback, useEffect, useMemo, useRef } from "react";
-import { BackSide, MOUSE, TOUCH, Vector3, type PerspectiveCamera } from "three";
+import { Canvas, useFrame, useThree } from "@react-three/fiber";
+import { Bloom, EffectComposer, SMAA, ToneMapping, Vignette } from "@react-three/postprocessing";
+import { ToneMappingMode } from "postprocessing";
+import { Suspense, useCallback, useEffect, useMemo, useRef, type ReactNode } from "react";
+import { BackSide, type Group, MOUSE, TOUCH, Vector3, type PerspectiveCamera } from "three";
 import type { MapControls as MapControlsImpl } from "three-stdlib";
 import { TRACK_COLOR, TYPE_ICON } from "../lib/constants";
 import { getTimeBounds, isBand, matchesFilter, toMinutes, tracksForDay } from "../lib/schedule";
 import type { ConferenceData, Session } from "../types";
+
+const Z_SCALE = 0.055;
+const X_GAP = 1.85;
+// Hero (resting) camera framing.
+const INITIAL_CAMERA_POSITION = new Vector3(0, 13.5, 16);
+const INITIAL_TARGET = new Vector3(0, -0.5, -1.5);
+// The intro starts as a high, slightly-tilted near-top-down that mirrors the Grid (tracks as
+// columns, time top→bottom, cards' coloured tops reading like grid blocks). Crossfading the DOM
+// grid into this pose is near-invisible; the camera then tilts up and pulls back into the hero
+// perspective as the cards rise — so the grid literally *becomes* the 3D scene. NB: a *fully*
+// vertical top-down renders the glossy cards black (they mirror the dark zenith), so the opening
+// is pitched ~25° off vertical where the cards catch light. The up-vector tilts toward hero too.
+const OVERHEAD_CAMERA_POSITION = new Vector3(0, 16.5, 4);
+const OVERHEAD_TARGET = new Vector3(0, -1, -3);
+const OVERHEAD_UP = new Vector3(0, 0.5, -0.85);
+const HERO_UP = new Vector3(0, 1, 0);
+
+// Transition timing (seconds).
+const CAM_DUR = 1.5;
+const TILE_DUR = 0.55;
+const TILE_STAGGER = 0.6; // spread across depth so the rise reads as a wave sweeping front→back
+// Tiles start at ~0.6 height — tall enough that their lacquered tops catch light and read as
+// bright grid blocks in the top-down opening (low slabs go black from above), then settle to full
+// height with a small overshoot. The "grid → 3D" feel comes mostly from the camera tilt.
+const TILE_MIN_SCALE = 0.6;
+
+// Which way the morph is playing. "in" = grid→3D, "out" = 3D→grid, "three" = settled (no anim).
+export type ThreePhase = "in" | "out" | "three";
+
+interface RevealState {
+  phase: ThreePhase;
+  // Progress is accumulated from clamped frame-deltas (not wall-clock) so a stall — e.g. the
+  // one-off shader compile on the first 3D frame — never skips visible frames of the morph.
+  elapsed: number;
+}
 
 interface ThreeScheduleViewProps {
   clashes: Set<string>;
@@ -13,18 +50,33 @@ interface ThreeScheduleViewProps {
   day: string;
   filters: { tracksOff: Set<string>; theme: string };
   stars: Set<string>;
+  phase?: ThreePhase;
+  onPhaseDone?: (phase: ThreePhase) => void;
+  onReady?: () => void;
   onOpenSession: (session: Session) => void;
   onToggleStar: (id: string) => void;
 }
 
-const Z_SCALE = 0.055;
-const X_GAP = 1.85;
-const INITIAL_CAMERA_POSITION = new Vector3(0, 13.5, 16);
-const INITIAL_TARGET = new Vector3(0, -0.5, -1.5);
-
-export function ThreeScheduleView({ clashes, data, day, filters, stars, onOpenSession, onToggleStar }: ThreeScheduleViewProps) {
+export function ThreeScheduleView({ clashes, data, day, filters, stars, phase = "three", onPhaseDone, onReady, onOpenSession, onToggleStar }: ThreeScheduleViewProps) {
   const cameraRef = useRef<PerspectiveCamera | null>(null);
   const controlsRef = useRef<MapControlsImpl | null>(null);
+
+  // Device/quality profile. Coarse pointers (phones/tablets) and small viewports get a lighter
+  // pipeline; sustained low FPS degrades further via PerformanceMonitor below.
+  const isMobile = useMemo(
+    () => typeof window !== "undefined" && (window.matchMedia("(pointer: coarse)").matches || window.matchMedia("(max-width: 680px)").matches),
+    [],
+  );
+  const reduceMotion = useMemo(() => typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches, []);
+  const lowQuality = isMobile;
+
+  // Shared morph clock — both the camera driver and the tiles read this so they stay in lockstep.
+  const reveal = useRef<RevealState>({ phase, elapsed: 0 });
+  useEffect(() => {
+    reveal.current.phase = phase;
+    reveal.current.elapsed = 0;
+  }, [phase]);
+
   const sessions = useMemo(() => data.sessions.filter((session) => session.date === day), [data, day]);
   const tracks = useMemo(() => {
     const matchingTalks = sessions.filter((session) => !isBand(session) && matchesFilter(session, filters));
@@ -176,10 +228,14 @@ export function ThreeScheduleView({ clashes, data, day, filters, stars, onOpenSe
   }, [zoomCamera, moveForward]);
 
   return (
-    <main className="threeWrap" data-testid="three-view" ref={wrapRef}>
+    <main className="threeWrap" data-testid="three-view" data-phase={phase} ref={wrapRef}>
       <Canvas
-        camera={{ position: INITIAL_CAMERA_POSITION.toArray(), fov: 44 }}
-        dpr={[1, 2]}
+        // Render on demand only — the schedule is static, so we draw during the morph and while
+        // the user interacts, then idle at 0 GPU. (The reflective floor + bloom re-render the
+        // scene every frame, so a continuous loop pins the GPU for no reason.)
+        frameloop="demand"
+        camera={{ position: (phase === "in" ? OVERHEAD_CAMERA_POSITION : INITIAL_CAMERA_POSITION).toArray(), fov: 44 }}
+        dpr={lowQuality ? 1 : 1.5}
         gl={{ preserveDrawingBuffer: true, antialias: true }}
         onCreated={({ camera }) => {
           cameraRef.current = camera as PerspectiveCamera;
@@ -213,7 +269,7 @@ export function ThreeScheduleView({ clashes, data, day, filters, stars, onOpenSe
           <Lightformer intensity={1} position={[0, 9, 5]} scale={[14, 4, 1]} color="#ffffff" />
         </Environment>
 
-        <Sparkles count={60} scale={[48, 18, 64]} position={[0, 6, -8]} size={2} speed={0.2} opacity={0.35} color="#9fb4ff" />
+        <Sparkles count={lowQuality ? 36 : 60} scale={[48, 18, 64]} position={[0, 6, -8]} size={2} speed={0.2} opacity={0.35} color="#9fb4ff" />
 
         <Suspense fallback={null}>
           <ScheduleScene
@@ -221,6 +277,9 @@ export function ThreeScheduleView({ clashes, data, day, filters, stars, onOpenSe
             dayStart={dayStart}
             duration={duration}
             filters={filters}
+            lowQuality={lowQuality}
+            reduceMotion={reduceMotion}
+            reveal={reveal}
             sessions={sessions}
             stars={stars}
             tracks={tracks}
@@ -228,6 +287,9 @@ export function ThreeScheduleView({ clashes, data, day, filters, stars, onOpenSe
             onToggleStar={onToggleStar}
           />
         </Suspense>
+
+        <IntroCamera controlsRef={controlsRef} phase={phase} reduceMotion={reduceMotion} reveal={reveal} onPhaseDone={onPhaseDone} onReady={onReady} />
+
         <MapControls
           ref={controlsRef}
           enableDamping
@@ -244,6 +306,14 @@ export function ThreeScheduleView({ clashes, data, day, filters, stars, onOpenSe
           mouseButtons={{ LEFT: MOUSE.ROTATE, MIDDLE: MOUSE.DOLLY, RIGHT: MOUSE.PAN }}
           touches={{ ONE: TOUCH.ROTATE, TWO: TOUCH.DOLLY_PAN }}
         />
+
+        {/* Cinematic grade: selective bloom on the emissive tiles/rims, gentle vignette, AA. */}
+        <EffectComposer multisampling={0}>
+          <Bloom mipmapBlur luminanceThreshold={0.55} luminanceSmoothing={0.2} intensity={lowQuality ? 0.55 : 0.7} />
+          <Vignette offset={0.25} darkness={0.55} />
+          <ToneMapping mode={ToneMappingMode.ACES_FILMIC} />
+          <SMAA />
+        </EffectComposer>
       </Canvas>
       <div className="threeHud">
         <span>3D prototype</span>
@@ -290,11 +360,104 @@ export function ThreeScheduleView({ clashes, data, day, filters, stars, onOpenSe
   );
 }
 
+interface IntroCameraProps {
+  controlsRef: React.RefObject<MapControlsImpl | null>;
+  phase: ThreePhase;
+  reduceMotion: boolean;
+  reveal: React.RefObject<RevealState>;
+  onPhaseDone?: (phase: ThreePhase) => void;
+  onReady?: () => void;
+}
+
+// Drives the camera between the overhead (grid-like) framing and the hero angle. Runs the
+// animation directly on the camera, then hands control back to MapControls. We disable the
+// controls while animating so user input can't fight the tween; MapControls.update() with no
+// pending delta is a no-op on the position we set, so it never overrides us.
+function IntroCamera({ controlsRef, phase, reduceMotion, reveal, onPhaseDone, onReady }: IntroCameraProps) {
+  const camera = useThree((state) => state.camera);
+  const invalidate = useThree((state) => state.invalidate);
+  const doneFor = useRef<ThreePhase | null>(null);
+  const paintedFrames = useRef(0);
+
+  // In demand mode the render loop is idle; a phase change must kick a frame so the morph's
+  // useFrame starts running (it then self-sustains via invalidate() until the tween finishes).
+  useEffect(() => {
+    invalidate();
+  }, [phase, invalidate]);
+
+  const settle = useCallback(
+    (phase: ThreePhase) => {
+      if (doneFor.current === phase) return;
+      doneFor.current = phase;
+      const controls = controlsRef.current;
+      if (phase === "in" && controls) {
+        controls.target.copy(INITIAL_TARGET);
+        controls.enabled = true;
+        controls.update();
+      }
+      onPhaseDone?.(phase);
+    },
+    [controlsRef, onPhaseDone],
+  );
+
+  useFrame((_, delta) => {
+    const r = reveal.current;
+    // Signal "first paint done" on the 2nd frame — frame 1's render compiles the shaders, so by
+    // frame 2 the scene is actually on screen. The grid (held on top by App) fades out from here.
+    paintedFrames.current += 1;
+    if (paintedFrames.current === 2) onReady?.();
+
+    if (r.phase === "three") {
+      doneFor.current = "three";
+      return;
+    }
+    doneFor.current = doneFor.current === r.phase ? r.phase : null;
+
+    const fromPos = r.phase === "in" ? OVERHEAD_CAMERA_POSITION : INITIAL_CAMERA_POSITION;
+    const toPos = r.phase === "in" ? INITIAL_CAMERA_POSITION : OVERHEAD_CAMERA_POSITION;
+    const fromTarget = r.phase === "in" ? OVERHEAD_TARGET : INITIAL_TARGET;
+    const toTarget = r.phase === "in" ? INITIAL_TARGET : OVERHEAD_TARGET;
+    const fromUp = r.phase === "in" ? OVERHEAD_UP : HERO_UP;
+    const toUp = r.phase === "in" ? HERO_UP : OVERHEAD_UP;
+
+    if (reduceMotion) {
+      camera.position.copy(toPos);
+      camera.up.copy(toUp);
+      camera.lookAt(toTarget);
+      camera.updateProjectionMatrix();
+      settle(r.phase);
+      return;
+    }
+
+    const controls = controlsRef.current;
+    if (r.elapsed === 0 && controls) controls.enabled = false;
+    // Clamp the step so a long stall (shader compile, tab refocus) can't jump the morph.
+    r.elapsed += Math.min(delta, 0.05);
+    const p = clamp01(r.elapsed / CAM_DUR);
+    const e = easeInOutCubic(p);
+
+    camera.position.lerpVectors(fromPos, toPos, e);
+    camera.up.copy(fromUp).lerp(toUp, e).normalize(); // rotate up from top-down (-Z) to hero (+Y)
+    const target = fromTarget.clone().lerp(toTarget, e);
+    camera.lookAt(target);
+    camera.updateProjectionMatrix();
+    if (controls) controls.target.copy(target);
+
+    if (p >= 1) settle(r.phase);
+    else invalidate(); // keep the demand loop running until the tween completes
+  });
+
+  return null;
+}
+
 interface ScheduleSceneProps {
   clashes: Set<string>;
   dayStart: number;
   duration: number;
   filters: { tracksOff: Set<string>; theme: string };
+  lowQuality: boolean;
+  reduceMotion: boolean;
+  reveal: React.RefObject<RevealState>;
   sessions: Session[];
   stars: Set<string>;
   tracks: string[];
@@ -302,7 +465,7 @@ interface ScheduleSceneProps {
   onToggleStar: (id: string) => void;
 }
 
-function ScheduleScene({ clashes, dayStart, duration, filters, sessions, stars, tracks, onOpenSession, onToggleStar }: ScheduleSceneProps) {
+function ScheduleScene({ clashes, dayStart, duration, filters, lowQuality, reduceMotion, reveal, sessions, stars, tracks, onOpenSession, onToggleStar }: ScheduleSceneProps) {
   const trackIndex = new Map(tracks.map((track, index) => [track, index]));
   const centerOffset = ((tracks.length - 1) * X_GAP) / 2;
   const dayDepth = duration * Z_SCALE;
@@ -312,13 +475,16 @@ function ScheduleScene({ clashes, dayStart, duration, filters, sessions, stars, 
 
   const floorY = -0.13;
 
+  // Tiles reveal earliest-first (far end) so the wave runs with the camera tilt.
+  const delayFor = (z: number) => (clamp01((z + dayDepth) / Math.max(0.001, dayDepth))) * TILE_STAGGER;
+
   return (
     <group position={[0, -1.3, dayDepth / 2]}>
       {/* Polished reflective floor — gives the glossy cards a mirror to sit on */}
       <mesh position={[0, floorY, -dayDepth / 2]} rotation={[-Math.PI / 2, 0, 0]}>
         <planeGeometry args={[110, 150]} />
         <MeshReflectorMaterial
-          resolution={1024}
+          resolution={lowQuality ? 256 : 512}
           mixBlur={2.2}
           mixStrength={1.4}
           blur={[700, 220]}
@@ -336,7 +502,7 @@ function ScheduleScene({ clashes, dayStart, duration, filters, sessions, stars, 
       <ContactShadows
         position={[0, floorY + 0.005, -dayDepth / 2]}
         scale={[boardWidth + 4, dayDepth + 4]}
-        resolution={1024}
+        resolution={lowQuality ? 256 : 512}
         opacity={0.55}
         blur={2.6}
         far={2.5}
@@ -381,9 +547,10 @@ function ScheduleScene({ clashes, dayStart, duration, filters, sessions, stars, 
         // Earliest at the far end, latest near the camera — reads top→down like Grid mode.
         const z = (start + minutes / 2) * Z_SCALE - dayDepth;
         const depth = Math.max(0.08, minutes * Z_SCALE - 0.04);
+        const baseY = floorY + 0.05;
 
         return (
-          <group key={session.id} position={[0, floorY + 0.05, z]}>
+          <AnimatedTile key={session.id} baseY={baseY} delay={delayFor(z)} halfHeight={0.04} position={[0, baseY, z]} reduceMotion={reduceMotion} reveal={reveal}>
             {/* Thin glossy break bar spanning the full board width */}
             <RoundedBox
               args={[boardWidth - 0.2, 0.08, depth]}
@@ -410,7 +577,7 @@ function ScheduleScene({ clashes, dayStart, duration, filters, sessions, stars, 
                 {session.start_time} {shortTitle(session.title, 36)}
               </Text>
             ) : null}
-          </group>
+          </AnimatedTile>
         );
       })}
 
@@ -439,9 +606,10 @@ function ScheduleScene({ clashes, dayStart, duration, filters, sessions, stars, 
         const charsPerLine = Math.max(8, Math.floor(innerW / (fontSize * 0.5)));
         const linesFit = Math.max(1, Math.floor(innerD / (fontSize * lineH)));
         const maxChars = Math.max(12, charsPerLine * linesFit - charsPerLine);
+        const baseY = floorY + 0.12;
 
         return (
-          <group key={session.id} position={[x, floorY + 0.12, z]}>
+          <AnimatedTile key={session.id} baseY={baseY} delay={delayFor(z)} halfHeight={0.07} position={[x, baseY, z]} reduceMotion={reduceMotion} reveal={reveal}>
             {/* Sleek, flat, lacquered tile with a sheen rim that catches the coloured lights */}
             <RoundedBox
               args={[1.16, 0.14, depth]}
@@ -459,7 +627,7 @@ function ScheduleScene({ clashes, dayStart, duration, filters, sessions, stars, 
               <meshPhysicalMaterial
                 color={shade(faceColor, -0.06)}
                 emissive={starred ? "#ffcf45" : faceColor}
-                emissiveIntensity={starred ? 0.4 : 0.16}
+                emissiveIntensity={starred ? 0.62 : 0.16}
                 roughness={0.36}
                 metalness={0.05}
                 clearcoat={1}
@@ -491,9 +659,45 @@ function ScheduleScene({ clashes, dayStart, duration, filters, sessions, stars, 
                 {TYPE_ICON[session.type] ?? ""} {shortTitle(session.title, maxChars)}
               </Text>
             ) : null}
-          </group>
+          </AnimatedTile>
         );
       })}
+    </group>
+  );
+}
+
+interface AnimatedTileProps {
+  baseY: number;
+  delay: number;
+  halfHeight: number;
+  position: [number, number, number];
+  reduceMotion: boolean;
+  reveal: React.RefObject<RevealState>;
+  children: ReactNode;
+}
+
+// Extrudes a tile up off the floor during the morph: scales its height 0→1 (staggered by depth)
+// and lifts it so it grows from the floor rather than its centre. Settled state is a plain
+// full-height tile, so day/filter changes outside a transition don't re-trigger the wave.
+function AnimatedTile({ baseY, delay, halfHeight, position, reduceMotion, reveal, children }: AnimatedTileProps) {
+  const ref = useRef<Group>(null);
+  useFrame(() => {
+    const group = ref.current;
+    if (!group) return;
+    const r = reveal.current;
+    let scale = 1;
+    if (!reduceMotion && (r.phase === "in" || r.phase === "out")) {
+      // Reads the camera driver's shared, delta-accumulated clock — no double-counting here.
+      const local = clamp01((r.elapsed - delay) / TILE_DUR);
+      // A touch of overshoot on the way up gives the tiles a satisfying "pop" as they rise.
+      scale = r.phase === "in" ? lerp(TILE_MIN_SCALE, 1, easeOutBack(local)) : lerp(1, TILE_MIN_SCALE, easeInCubic(local));
+    }
+    group.scale.y = scale;
+    group.position.y = baseY - halfHeight * (1 - scale);
+  });
+  return (
+    <group ref={ref} position={position}>
+      {children}
     </group>
   );
 }
@@ -502,6 +706,16 @@ function shortTitle(title: string, maxLength: number): string {
   if (title.length <= maxLength) return title;
   return `${title.slice(0, maxLength - 1)}…`;
 }
+
+const clamp01 = (t: number) => Math.min(1, Math.max(0, t));
+const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
+const easeInOutCubic = (t: number) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
+const easeInCubic = (t: number) => t * t * t;
+const easeOutBack = (t: number) => {
+  const c1 = 1.70158;
+  const c3 = c1 + 1;
+  return 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2);
+};
 
 // Lighten (amount > 0) or darken (amount < 0) a hex colour, clamped to [0,255] per channel.
 function shade(hex: string, amount: number): string {
